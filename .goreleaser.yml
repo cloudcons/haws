@@ -1,38 +1,39 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
-before: 
-  hooks: 
+before:
+  hooks:
     # You may remove this if you don't use go modules.
     - go mod tidy
     # you may remove this if you don't need go generate
     # - go generate ./...
-builds: 
+builds:
   - id: haws
-    env: 
+    env:
       - CGO_ENABLED=0
-    goos: 
+    goos:
       - linux
       - darwin
       - windows
     main: .
     binary: haws
-    goarch: 
+    goarch:
       - amd64
       - arm
       - arm64
-release: 
-  github: 
+release:
+  github:
     owner: dragosboca
     name: haws
 
 archives:
-  
-  checksum: 
-    name_template: 'checksums.txt'
-  snapshot: 
-    name_template: "{{ .Tag }}-next"
-  changelog: 
-    sort: asc
-    filters: 
-      exclude: 
-        - '^docs:'
-        - '^test:'
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+snapshot:
+  name_template: "{{ .Tag }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

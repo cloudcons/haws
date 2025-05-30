@@ -1,13 +1,14 @@
 package haws
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/route53"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/dragosboca/haws/pkg/components"
+	"github.com/dragosboca/haws/pkg/logger"
 	"github.com/dragosboca/haws/pkg/stack"
 )
 
@@ -19,8 +20,7 @@ type Haws struct {
 func New(dryRun bool, prefix string, region string, zone_id string, bucketPath string, record string) Haws {
 	domain, err := getZoneDomain(zone_id)
 	if err != nil {
-		fmt.Printf("%s\n", err)
-		os.Exit(1)
+		logger.Fatal("Failed to get zone domain: %v", err)
 	}
 
 	h := Haws{
@@ -65,11 +65,11 @@ func New(dryRun bool, prefix string, region string, zone_id string, bucketPath s
 	return h
 }
 
-func (h *Haws) Deploy() error {
+func (h *Haws) Deploy(ctx context.Context) error {
 	stacks := []string{"certificate", "bucket", "cloudfront", "user"}
 	for _, stack := range stacks {
-		if stack == "cloudfronnt" { // ALL THIS STUPID THING BECAUSE CLOUDFORMATION DOES NOT SUPPORT CROSS REGION REFERENCES
-			if err := h.GetStackOutput("certificate"); err != nil {
+		if stack == "cloudfront" { // CloudFormation cross-region limitation workaround
+			if err := h.GetStackOutput(ctx, "certificate"); err != nil {
 				return err
 			}
 
@@ -82,33 +82,37 @@ func (h *Haws) Deploy() error {
 				return err
 			}
 		}
-		if err := h.DeployStack(stack); err != nil {
+		if err := h.DeployStack(ctx, stack); err != nil {
 			return err
 		}
-
 	}
 	return nil
 }
 
-func (h *Haws) DeployStack(name string) error {
+func (h *Haws) DeployStack(ctx context.Context, name string) error {
 	if h.dryRun {
-		fmt.Printf("DryRunning %s\n", name)
-		return h.stacks[name].DryRun()
+		logger.Info("DryRunning %s", name)
+		return h.stacks[name].DryRun(ctx)
 	} else {
-		fmt.Printf("Running %s\n", name)
-		return h.stacks[name].Run()
+		logger.Info("Running %s", name)
+		return h.stacks[name].Run(ctx)
 	}
 }
 
-func (h *Haws) GetStackOutput(name string) error {
-	return h.stacks[name].GetOutputs()
+func (h *Haws) GetStackOutput(ctx context.Context, name string) error {
+	return h.stacks[name].GetOutputs(ctx)
 }
 
 func getZoneDomain(zoneId string) (string, error) {
-	s := session.Must(session.NewSession())
-	svc := route53.New(s)
-
-	result, err := svc.GetHostedZone(&route53.GetHostedZoneInput{
+	ctx := context.Background()
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return "", fmt.Errorf("unable to load SDK config: %w", err)
+	}
+	
+	svc := route53.NewFromConfig(cfg)
+	
+	result, err := svc.GetHostedZone(ctx, &route53.GetHostedZoneInput{
 		Id: &zoneId,
 	})
 	if err != nil {

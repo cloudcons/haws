@@ -2,28 +2,22 @@ package stack
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"context"
 
-	"github.com/aws/aws-sdk-go/service/cloudformation"
+	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
+	"github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
+	"github.com/dragosboca/haws/pkg/logger"
 	"github.com/goombaio/namegenerator"
 )
 
 const EmptyChangeSet = "The submitted information didn't contain changes. Submit different information to create a change set."
 
-// FIXME use type assertions on error
-// FIXME FIXME: https://github.com/aws/aws-sdk/issues/44
-func (st *Stack) stackExist() bool {
-	_, err := st.CloudFormation.DescribeStacks(&cloudformation.DescribeStacksInput{
+func (st *Stack) stackExist(ctx context.Context) bool {
+	_, err := st.cloudFormationClient.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{
 		StackName: st.GetStackName(),
 	})
-	//if err != nil {
-	//	if aerr, ok := err.(awserr.Error); ok{
-	//		switch aerr.Code() {
-	//		case cloudformation.AmazonCloudFormationException:
-	//
-	//		}
-	//	}
-	//}
 	return err == nil
 }
 
@@ -34,7 +28,7 @@ func (st *Stack) templateJson() (string, error) {
 	template := st.Build()
 	templateBody, err := template.JSON()
 	if err != nil {
-		fmt.Printf("Create template error: %s\n", err)
+		logger.Error("Create template error: %s", err)
 		return "", err
 	}
 	return string(templateBody), nil
@@ -45,25 +39,34 @@ func (st *Stack) templateJson() (string, error) {
 // return: csName - the name of the changeset
 // return: csType - the type of the changeset (CREATE or UPDATE)
 // return: error - the error if any
-func (st *Stack) initialChangeSet(templateBody string) (string, string, error) {
+func (st *Stack) initialChangeSet(ctx context.Context, templateBody string) (string, string, error) {
 	seed := time.Now().UTC().UnixNano()
 	nameGenerator := namegenerator.NewNameGenerator(seed)
 
 	csName := nameGenerator.Generate()
 
 	csType := "CREATE"
-	if st.stackExist() {
+	if st.stackExist(ctx) {
 		csType = "UPDATE"
-		fmt.Printf("Updating stack: %s with changeset: %s\n", *st.GetStackName(), csName)
+		logger.Info("Updating stack: %s with changeset: %s", *st.GetStackName(), csName)
 	} else {
-		fmt.Printf("Creating stack: %s with changeset: %s\n", *st.GetStackName(), csName)
+		logger.Info("Creating stack: %s with changeset: %s", *st.GetStackName(), csName)
 	}
 
-	_, err := st.CloudFormation.CreateChangeSet(&cloudformation.CreateChangeSetInput{
+	// Convert CloudFormation v1 Parameters to v2 Parameters
+	v2Params := make([]types.Parameter, 0, len(st.GetParameters()))
+	for _, param := range st.GetParameters() {
+		v2Params = append(v2Params, types.Parameter{
+			ParameterKey:   param.ParameterKey,
+			ParameterValue: param.ParameterValue,
+		})
+	}
+	
+	_, err := st.cloudFormationClient.CreateChangeSet(ctx, &cloudformation.CreateChangeSetInput{
 		ClientToken:   &csName,
 		ChangeSetName: &csName,
-		ChangeSetType: &csType,
-		Parameters:    st.GetParameters(),
+		ChangeSetType: types.ChangeSetType(csType),
+		Parameters:    v2Params,
 		StackName:     st.GetStackName(),
 		TemplateBody:  &templateBody,
 	})
@@ -77,23 +80,32 @@ func (st *Stack) initialChangeSet(templateBody string) (string, string, error) {
 // param: csName - the name of the changeset
 // return: bool - true if the changeset is empty and should be deleted
 // return: error - the error if any
-func (st *Stack) waitForChangeSet(csName string) (bool, error) {
-	fmt.Printf("Waiting for the changeset %s creation to complete\n", csName)
-	err := st.CloudFormation.WaitUntilChangeSetCreateComplete(&cloudformation.DescribeChangeSetInput{
-		ChangeSetName: &csName,
-		StackName:     st.GetStackName(),
-	})
-	if err != nil {
-		desc, err := st.CloudFormation.DescribeChangeSet(&cloudformation.DescribeChangeSetInput{
+func (st *Stack) waitForChangeSet(ctx context.Context, csName string) (bool, error) {
+	logger.Info("Waiting for the changeset %s creation to complete", csName)
+	
+	// AWS SDK v2 doesn't have built-in waiters, so we'll implement a simple polling mechanism
+	maxAttempts := 30
+	delay := time.Second * 2
+	
+	for i := 0; i < maxAttempts; i++ {
+		desc, err := st.cloudFormationClient.DescribeChangeSet(ctx, &cloudformation.DescribeChangeSetInput{
 			ChangeSetName: &csName,
 			StackName:     st.GetStackName(),
 		})
+		
 		if err != nil {
 			return false, err
 		}
-		if *desc.Status == cloudformation.ChangeSetStatusFailed && *desc.StatusReason == EmptyChangeSet {
-			fmt.Printf("Deleting empty changeset %s\n", csName)
-			_, err := st.CloudFormation.DeleteChangeSet(&cloudformation.DeleteChangeSetInput{
+		
+		// Check if the change set is ready
+		if desc.Status == types.ChangeSetStatusCreateComplete {
+			return false, nil
+		}
+		
+		// Check if the change set failed because it's empty
+		if desc.Status == types.ChangeSetStatusFailed && *desc.StatusReason == EmptyChangeSet {
+			logger.Info("Deleting empty changeset %s", csName)
+			_, err := st.cloudFormationClient.DeleteChangeSet(ctx, &cloudformation.DeleteChangeSetInput{
 				ChangeSetName: &csName,
 				StackName:     st.GetStackName(),
 			})
@@ -101,20 +113,25 @@ func (st *Stack) waitForChangeSet(csName string) (bool, error) {
 				return false, err
 			}
 			return true, nil
-		} else {
-			return false, err
+		} else if desc.Status == types.ChangeSetStatusFailed {
+			// Failed for some other reason
+			return false, fmt.Errorf("change set creation failed: %s", *desc.StatusReason)
 		}
+		
+		// Wait before checking again
+		time.Sleep(delay)
 	}
-	return false, nil
+	
+	return false, fmt.Errorf("timed out waiting for change set creation to complete")
 }
 
 // executeChangeSet executes the changeset
 // param: csName - the name of the changeset
 // param: csType - the type of the changeset (CREATE or UPDATE)
 // return: error - the error if any
-func (st *Stack) executeChangeSet(csName string, csType string) error {
-	fmt.Printf("Executing change set: %s on stack %s\n", csName, *st.GetStackName())
-	_, err := st.CloudFormation.ExecuteChangeSet(&cloudformation.ExecuteChangeSetInput{
+func (st *Stack) executeChangeSet(ctx context.Context, csName string, csType string) error {
+	logger.Info("Executing change set: %s on stack %s", csName, *st.GetStackName())
+	_, err := st.cloudFormationClient.ExecuteChangeSet(ctx, &cloudformation.ExecuteChangeSetInput{
 		ChangeSetName:      &csName,
 		ClientRequestToken: &csName,
 		StackName:          st.GetStackName(),
@@ -123,15 +140,46 @@ func (st *Stack) executeChangeSet(csName string, csType string) error {
 		return err
 	}
 
-	fmt.Printf("Waiting for the changeset %s execution to complete\n", csName)
+	logger.Info("Waiting for the changeset %s execution to complete", csName)
+	
+	// Implementation of waiter using polling since SDK v2 doesn't have built-in waiters
+	maxAttempts := 120 // Cloud formation stacks can take a while
+	delay := time.Second * 5
+	
+	targetStatus := ""
 	if csType == "CREATE" {
-		err = st.CloudFormation.WaitUntilStackCreateComplete(&cloudformation.DescribeStacksInput{
-			StackName: st.GetStackName(),
-		})
+		targetStatus = string(types.StackStatusCreateComplete)
 	} else {
-		err = st.CloudFormation.WaitUntilStackUpdateComplete(&cloudformation.DescribeStacksInput{
+		targetStatus = string(types.StackStatusUpdateComplete)
+	}
+	
+	for i := 0; i < maxAttempts; i++ {
+		resp, err := st.cloudFormationClient.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{
 			StackName: st.GetStackName(),
 		})
+		
+		if err != nil {
+			return err
+		}
+		
+		if len(resp.Stacks) == 0 {
+			return fmt.Errorf("stack not found")
+		}
+		
+		stackStatus := string(resp.Stacks[0].StackStatus)
+		
+		if stackStatus == targetStatus {
+			return nil
+		}
+		
+		// Check for failure states
+		if strings.HasSuffix(stackStatus, "FAILED") || 
+		   strings.HasSuffix(stackStatus, "ROLLBACK_COMPLETE") {
+			return fmt.Errorf("stack operation failed: %s", stackStatus)
+		}
+		
+		time.Sleep(delay)
 	}
-	return err
+	
+	return fmt.Errorf("timed out waiting for stack operation to complete")
 }

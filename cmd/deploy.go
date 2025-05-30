@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -17,6 +18,7 @@ var (
 		Long:  "Deploy all stacks",
 
 		Run: func(cmd *cobra.Command, args []string) {
+			ctx := context.Background()
 			h := haws.New(dryRun,
 				viper.GetString("prefix"),
 				viper.GetString("region"),
@@ -25,7 +27,7 @@ var (
 				viper.GetString("record"),
 			)
 
-			if err := h.Deploy(); err != nil {
+			if err := h.Deploy(ctx); err != nil {
 				fmt.Printf("%v\n", err)
 				os.Exit(1)
 			}

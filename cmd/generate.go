@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -17,6 +18,7 @@ var (
 		Long:  "Generate various config files and print them on the screen",
 
 		Run: func(cmd *cobra.Command, args []string) {
+			ctx := context.Background()
 
 			h := haws.New(dryRun,
 				viper.GetString("prefix"),
@@ -28,7 +30,7 @@ var (
 
 			stacks := []string{"certificate", "bucket", "cloudfront", "user"}
 			for _, stack := range stacks {
-				if err := h.GetStackOutput(stack); err != nil {
+				if err := h.GetStackOutput(ctx, stack); err != nil {
 					fmt.Printf("%v\n", err)
 					os.Exit(1)
 				}

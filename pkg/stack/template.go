@@ -3,7 +3,7 @@ package stack
 import (
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/service/cloudformation"
+	"github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
 	cfn "github.com/awslabs/goformation/v4/cloudformation"
 )
 
@@ -13,7 +13,7 @@ type Template interface {
 	GetStackName() *string
 	GetRegion() string
 	GetExportName(string) string
-	GetParameters() []*cloudformation.Parameter
+	GetParameters() []types.Parameter
 	GetDryRunOutputs() map[string]string
 	SetParameterValue(string, string) error
 }
@@ -22,7 +22,7 @@ type Template interface {
 // It is used to build a CloudFormation template
 type TemplateComponent struct {
 	Region        string
-	Params        []*cloudformation.Parameter
+	Params        []types.Parameter
 	Parameters    map[string]cfn.Parameter
 	Resources     map[string]*cfn.Resource
 	Outputs       map[string]cfn.Output
@@ -31,7 +31,7 @@ type TemplateComponent struct {
 
 func NewTemplate(region string) TemplateComponent {
 	b := TemplateComponent{
-		Params:        make([]*cloudformation.Parameter, 0),
+		Params:        make([]types.Parameter, 0),
 		Parameters:    make(map[string]cfn.Parameter),
 		Resources:     make(map[string]*cfn.Resource),
 		Outputs:       make(map[string]cfn.Output),
@@ -48,7 +48,7 @@ func NewTemplate(region string) TemplateComponent {
 // param: def - the default value of the parameter
 func (t *TemplateComponent) AddParameter(name string, parameter cfn.Parameter, def string) {
 	t.Parameters[name] = parameter
-	t.Params = append(t.Params, &cloudformation.Parameter{
+	t.Params = append(t.Params, types.Parameter{
 		ParameterKey:   &name,
 		ParameterValue: &def,
 	})
@@ -71,8 +71,8 @@ func (t *TemplateComponent) AddOutput(name string, output cfn.Output, dryRunValu
 }
 
 // GetParameters returns the parameters of the template
-// return: []*cloudformation.Parameter - the parameters of the template
-func (t *TemplateComponent) GetParameters() []*cloudformation.Parameter {
+// return: []types.Parameter - the parameters of the template
+func (t *TemplateComponent) GetParameters() []types.Parameter {
 	return t.Params
 }
 
@@ -109,9 +109,13 @@ func (t *TemplateComponent) GetRegion() string {
 func (t *TemplateComponent) SetParameterValue(name string, value string) error {
 	if param, ok := t.Parameters[name]; ok {
 		t.Parameters[name] = param
-		for _, p := range t.Params {
+		for i, p := range t.Params {
 			if *p.ParameterKey == name {
-				p.ParameterValue = &value
+				// Create a new parameter with updated value since the Parameter fields are not directly mutable
+				t.Params[i] = types.Parameter{
+					ParameterKey:   p.ParameterKey,
+					ParameterValue: &value,
+				}
 			}
 		}
 		return nil
